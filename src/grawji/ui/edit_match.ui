@@ -67,6 +67,10 @@
               </object>
             </child>
             <child>
+              <object class="GtkRevealer" id="options_revealer">
+                <property name="reveal-child">true</property>
+                <property name="transition-type">slide-up</property>
+                <property name="child">
               <object class="GtkListBox">
                 <property name="selection-mode">none</property>
                 <style>
@@ -86,6 +90,32 @@
                     <property name="active">false</property>
                   </object>
                 </child>
+                <child>
+                  <object class="AdwActionRow" id="budget_row">
+                    <property name="title">Renders to spend</property>
+                    <property name="subtitle">The search settles for the best it has when they are used up</property>
+                    <child type="suffix">
+                      <object class="GtkScale" id="budget_scale">
+                        <property name="width-request">280</property>
+                        <property name="valign">center</property>
+                        <property name="draw-value">true</property>
+                        <property name="value-pos">left</property>
+                        <property name="round-digits">0</property>
+                        <property name="adjustment">
+                          <object class="GtkAdjustment">
+                            <property name="lower">200</property>
+                            <property name="upper">1600</property>
+                            <property name="step-increment">100</property>
+                            <property name="page-increment">100</property>
+                            <property name="value">900</property>
+                          </object>
+                        </property>
+                      </object>
+                    </child>
+                  </object>
+                </child>
+              </object>
+                </property>
               </object>
             </child>
             <child>
@@ -113,6 +143,16 @@
             <child>
               <object class="GtkSpinner" id="spinner">
                 <property name="visible">false</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkToggleButton" id="options_button">
+                <property name="icon-name">emblem-system-symbolic</property>
+                <property name="tooltip-text">Show the options</property>
+                <property name="visible">false</property>
+                <style>
+                  <class name="flat"/>
+                </style>
               </object>
             </child>
             <child>
