@@ -6,7 +6,7 @@ import itertools
 import math
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import numpy as np
 
@@ -35,11 +35,14 @@ STAGE_LOOK = "tones and color"
 STAGE_FINE = "fine tuning"
 STAGE_RECHECK = "film simulation check"
 STAGE_CLARITY = "clarity"
+STAGE_TEXTURE = "texture"
 
 # Compare at this width: enough for the look, forgiving about detail.
 COMPARE_WIDTH = 96
 # A step only counts when it beats the camera's render-to-render noise.
 _MARGIN = 0.03
+# The same for the texture.
+_TEXTURE_MARGIN = 0.01
 # How much the edit's overall statistics count next to the per-pixel
 # difference.
 _LOOK_WEIGHT = 0.4
@@ -68,8 +71,11 @@ _POLISH_REACH = (1, 2)
 _SWEEPS = 4
 # Step sizes from coarse to fine.
 _LEVELS = 3
-# How many of the leading film simulations get tuned in full.
-_CANDIDATES = 2
+# How many of the leading film simulations get tuned in full, the least
+# and the most, and how far a neutral render may trail the leader's,
+# as a share of it, to count as leading.
+_CANDIDATES = (2, 4)
+_LEADER_SLACK = 0.3
 # A further candidate whose look trails the best one by more than this
 # after the tone walk is dropped before its polish.
 _CANDIDATE_GAP = 1.0
@@ -96,6 +102,9 @@ _MONO_SIMS = ("Acros", "AcrosR", "AcrosYe", "AcrosG")
 _MONOCHROME = ("Monochrome", "MonochromeR", "MonochromeYe", "MonochromeG")
 _NO_COLOR = (*_MONO_SIMS, *_MONOCHROME, "Sepia")
 _EXPOSURE_RANGE = (-2.0, 3.0)
+_GRAIN_SIZES = ("Small", "Large")
+# The texture controls, walked in coarse then fine steps.
+_TEXTURE_LEVELS = 2
 # Controls stored as floats on a half or whole step grid.
 _HALF_STEP_CONTROLS = ("highlights", "shadows")
 _SRGB_TO_XYZ = np.array(
@@ -123,6 +132,21 @@ class SearchHooks:
 
 class SearchCancelledError(Exception):
     """The search was stopped before it finished."""
+
+
+class TextureScorer(Protocol):
+    """Tells how far a full-size render's texture is from the edit's."""
+
+    def compare(self, render: NDArray[np.uint8]) -> float:
+        """Zero for the same detail and noise, growing with the gap."""
+
+
+@dataclass(frozen=True)
+class TextureSearch:
+    """What the optional texture stage needs."""
+
+    render: Render
+    target: TextureScorer
 
 
 @dataclass(frozen=True)
@@ -156,6 +180,7 @@ class _Plan:
 
     levels: range
     reach: tuple[int, ...] = (1,)
+    margin: float = _MARGIN
 
 
 class LookTarget:
@@ -359,7 +384,7 @@ class _Renders:
         return len(self._views)
 
     def __call__(self, recipe: Recipe) -> NDArray[np.float64]:
-        key = repr(sorted(asdict(recipe).items()))
+        key = _key(recipe)
         if key not in self._views:
             if self._cancelled is not None and self._cancelled():
                 raise SearchCancelledError
@@ -373,6 +398,7 @@ def search(
     render: Render,
     target: LookTarget,
     hooks: SearchHooks | None = None,
+    texture: TextureSearch | None = None,
 ) -> Match:
     """The recipe whose render comes closest to the edit."""
     hooks = hooks or SearchHooks()
@@ -404,10 +430,15 @@ def search(
     # A shot's own white balance can be far from the edit's, and a color
     # simulation with the wrong cast must not lose to a neutral B&W one.
     ranked = sorted(
-        (_with_sim(base, sim) for sim in capabilities.film_simulations),
-        key=film,
+        (
+            (film(recipe), recipe)
+            for recipe in (
+                _with_sim(base, sim) for sim in capabilities.film_simulations
+            )
+        ),
+        key=lambda item: item[0],
     )
-    better(ranked[0])
+    better(ranked[0][1])
 
     def tones_and_color(recipe: Recipe) -> list[_Numeric]:
         return [
@@ -489,7 +520,99 @@ def search(
             key=lambda result: result[1],
         )
     likeness = target.likeness(renders(best))
-    return Match(_kept(best, start), likeness, renders.count)
+    best, count = _textured(
+        best, texture, capabilities, hooks, renders.count, enter
+    )
+    return Match(_kept(best, start), likeness, count)
+
+
+def _textured(
+    best: Recipe,
+    texture: TextureSearch | None,
+    capabilities: Capabilities,
+    hooks: SearchHooks,
+    made: int,
+    enter: Callable[[str], None],
+) -> tuple[Recipe, int]:
+    """The texture stage, when asked for, after this many renders."""
+    if texture is None:
+        return best, made
+    enter(STAGE_TEXTURE)
+
+    def progress(recipe: Recipe, count: int) -> None:
+        if hooks.progress is not None:
+            hooks.progress(recipe, made + count)
+
+    best, count = _texture(
+        best, texture, capabilities, hooks.cancelled, progress
+    )
+    return best, made + count
+
+
+def _texture(
+    best: Recipe,
+    texture: TextureSearch,
+    capabilities: Capabilities,
+    cancelled: Callable[[], bool] | None,
+    progress: Callable[[Recipe, int], None],
+) -> tuple[Recipe, int]:
+    """Sharpness, noise reduction and grain, on full-size renders."""
+    scores: dict[str, float] = {}
+
+    def score(recipe: Recipe) -> float:
+        key = _key(recipe)
+        if key not in scores:
+            if cancelled is not None and cancelled():
+                raise SearchCancelledError
+            scores[key] = texture.target.compare(texture.render(recipe))
+        return scores[key]
+
+    def choices(recipe: Recipe) -> list[tuple[str, tuple[str, ...]]]:
+        options: list[tuple[str, tuple[str, ...]]] = [("grain", _STRENGTHS)]
+        if capabilities.has_grain_size and recipe.grain != "Off":
+            options.append(("grain_size", _GRAIN_SIZES))
+        return options
+
+    def better(recipe: Recipe) -> None:
+        progress(recipe, len(scores))
+
+    best = _grain(best, score, capabilities, better)
+    found, _score = _walk(
+        best,
+        score,
+        lambda _r: _texture_numerics(),
+        choices,
+        _Plan(range(_TEXTURE_LEVELS), margin=_TEXTURE_MARGIN),
+        better,
+    )
+    return found, len(scores)
+
+
+def _grain(
+    best: Recipe,
+    score: Callable[[Recipe], float],
+    capabilities: Capabilities,
+    better: Callable[[Recipe], None],
+) -> Recipe:
+    """The grain whose render comes closest, strength and size as one."""
+    sizes = _GRAIN_SIZES if capabilities.has_grain_size else (best.grain_size,)
+    best_score = score(best)
+    for grain in _STRENGTHS:
+        for size in sizes if grain != "Off" else (best.grain_size,):
+            trial = replace(best, grain=grain, grain_size=size)
+            trial_score = score(trial)
+            if trial_score < best_score - _TEXTURE_MARGIN:
+                best, best_score = trial, trial_score
+                better(best)
+    return best
+
+
+def _texture_numerics() -> list[_Numeric]:
+    """The numeric texture controls, the same on every body."""
+    return [
+        _Numeric("sharpness", -4, 4, (2, 1)),
+        _Numeric("noise_reduction", -4, 4, (2, 1)),
+    ]
 
 
 def _clarity(
@@ -527,11 +650,17 @@ def _clarity(
 
 
 def _leaders(
-    ranked: list[Recipe], score: Callable[[Recipe], float]
+    ranked: list[tuple[float, Recipe]], score: Callable[[Recipe], float]
 ) -> list[Recipe]:
     """The leading simulations to tune."""
-    leaders = ranked[:_CANDIDATES]
-    own = min(ranked, key=score)
+    least, most = _CANDIDATES
+    bar = ranked[0][0] * (1.0 + _LEADER_SLACK)
+    leaders = [
+        recipe
+        for rank, (value, recipe) in enumerate(ranked)
+        if rank < least or (rank < most and value <= bar)
+    ]
+    own = min((recipe for _value, recipe in ranked), key=score)
     if own not in leaders:
         leaders.append(own)
     return leaders
@@ -568,16 +697,13 @@ def _neutral(start: Recipe) -> Recipe:
 
 
 def _kept(found: Recipe, start: Recipe) -> Recipe:
-    """The found recipe with what the search leaves alone taken from start."""
-    return replace(
-        found,
-        grain=start.grain,
-        grain_size=start.grain_size,
-        sharpness=start.sharpness,
-        noise_reduction=start.noise_reduction,
-        color_space=start.color_space,
-        smooth_skin=start.smooth_skin,
-    )
+    """The found recipe with what no search judges taken from start."""
+    return replace(found, color_space=start.color_space)
+
+
+def _key(recipe: Recipe) -> str:
+    """What tells one rendered recipe from another."""
+    return repr(sorted(asdict(recipe).items()))
 
 
 def _with(recipe: Recipe, name: str, value: object) -> Recipe:
@@ -612,34 +738,103 @@ def _walk(
                 for choice in values:
                     trial = _with(best, name, choice)
                     trial_score = score(trial)
-                    if trial_score < best_score - _MARGIN:
+                    if trial_score < best_score - plan.margin:
                         best, best_score, improved = trial, trial_score, True
                         better(best)
-            for control in controls(best):
-                step = control.steps[min(level, len(control.steps) - 1)]
-                moved = True
-                while moved:
-                    moved = False
-                    for direction in (
-                        sign * step * times
-                        for times in plan.reach
-                        for sign in (1, -1)
-                    ):
-                        value = _snap(
-                            control, getattr(best, control.name) + direction
-                        )
-                        if value is None:
-                            continue
-                        trial = _with(best, control.name, value)
-                        trial_score = score(trial)
-                        if trial_score < best_score - _MARGIN:
-                            best, best_score = trial, trial_score
-                            moved = improved = True
-                            better(best)
-                            break
+            while True:
+                move = _steepest(best, score, controls(best), level, plan)
+                if move is None:
+                    pair = _paired(best, score, controls(best), level, plan)
+                    if pair is None:
+                        break
+                    best, best_score = pair
+                    improved = True
+                    better(best)
+                    continue
+                best, best_score, control, direction = move
+                improved = True
+                better(best)
+                while True:
+                    further = _stepped(best, control, direction)
+                    if further is None:
+                        break
+                    further_score = score(further)
+                    if further_score >= best_score - plan.margin:
+                        break
+                    best, best_score = further, further_score
+                    better(best)
             if not improved:
                 break
     return best, best_score
+
+
+def _steepest(
+    best: Recipe,
+    score: Callable[[Recipe], float],
+    controls: list[_Numeric],
+    level: int,
+    plan: _Plan,
+) -> tuple[Recipe, float, _Numeric, float] | None:
+    """The single step of any control that helps the most, if one does."""
+    best_score = score(best)
+    found = None
+    for control in controls:
+        step = _step(control, level)
+        for direction in (
+            sign * step * times for times in plan.reach for sign in (1, -1)
+        ):
+            trial = _stepped(best, control, direction)
+            if trial is None:
+                continue
+            trial_score = score(trial)
+            if trial_score < best_score - plan.margin:
+                best_score = trial_score
+                found = (trial, trial_score, control, direction)
+    return found
+
+
+def _paired(
+    best: Recipe,
+    score: Callable[[Recipe], float],
+    controls: list[_Numeric],
+    level: int,
+    plan: _Plan,
+) -> tuple[Recipe, float] | None:
+    """The step of two controls at once that helps the most, if one does."""
+    by_name = {control.name: control for control in controls}
+    best_score = score(best)
+    found = None
+    for names in _PAIRS:
+        if not all(name in by_name for name in names):
+            continue
+        first, second = (by_name[name] for name in names)
+        for sign_a, sign_b in itertools.product((1, -1), repeat=2):
+            moved = _stepped(best, first, sign_a * _step(first, level))
+            if moved is None:
+                continue
+            trial = _stepped(moved, second, sign_b * _step(second, level))
+            if trial is None:
+                continue
+            trial_score = score(trial)
+            if trial_score < best_score - plan.margin:
+                best_score = trial_score
+                found = (trial, trial_score)
+    return found
+
+
+def _step(control: _Numeric, level: int) -> float:
+    """The step size of a control at this level of the walk."""
+    return control.steps[min(level, len(control.steps) - 1)]
+
+
+def _stepped(
+    recipe: Recipe, control: _Numeric, direction: float
+) -> Recipe | None:
+    """The recipe with one control moved this far, None off its range."""
+    value = _snap(control, getattr(recipe, control.name) + direction)
+    if value is None:
+        return None
+    return _with(recipe, control.name, value)
 
 
 def _pair_walk(
