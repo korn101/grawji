@@ -36,6 +36,11 @@ RAF, and renders follow as you move a control.
   picking a simulation you already previewed shows it at once.
 - **Exposure per image**, kept apart from the recipe, so one recipe
   fits a whole folder while each frame keeps its own brightness.
+- **A recipe per image**, if you prefer: by default the recipe carries
+  over as you switch images. With "Give each image its own recipe" in
+  Preferences, every image opens with the recipe it was shot with, and
+  edits or a recipe picked for an image stay with it while grawji is
+  open.
 - **Hold to peek** at the in-camera original (`\` or hold the eye
   button).
 - **Zoom** up to 800 % with pan, and a navigator on the Info tab's
