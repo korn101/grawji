@@ -21,7 +21,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
-from grawji import mainloop, raf, sidecar
+from grawji import mainloop, raf, recipe_match, sidecar
 from grawji.camera import camera_info
 from grawji.camera.capabilities import (
     BASELINE,
@@ -64,6 +64,7 @@ from grawji.imaging.thumbnails import ThumbnailLoader
 from grawji.look_match import SearchCancelledError
 from grawji.marks import Label
 from grawji.pairs import Source, companion_label
+from grawji.photo_recipe import recipe_from_tags
 from grawji.recipe import Recipe
 from grawji.recipes import UNGROUPED, RecipeLibrary, recipes_path
 from grawji.settings import (
@@ -206,6 +207,21 @@ def _timeout_once(delay_ms: int, callback: Callable[[], None]) -> int:
     return int(GLib.timeout_add(delay_ms, fire))
 
 
+def _shot_recipe_of(path: str) -> Recipe | None:
+    """The recipe a photo's metadata records, or None if it has none.
+
+    An unreadable or odd file only loses the label: this runs ahead of the
+    preview decode, which must not be stopped by it.
+    """
+    try:
+        read = imagemeta.photo_tags(path)
+        found = recipe_from_tags(read) if read is not None else None
+    except Exception:
+        logging.getLogger("grawji").debug("no recipe read from %s", path)
+        return None
+    return found.recipe if found is not None else None
+
+
 @Gtk.Template(string=_UI)
 class MainWindow(Adw.ApplicationWindow):
     """grawji main window: browse RAFs, tune recipe, preview, export."""
@@ -232,6 +248,8 @@ class MainWindow(Adw.ApplicationWindow):
 
     _marks: MarksController
     _mark_actions: list[Gio.SimpleAction]
+    # The recipe the open image records, None until read or if it has none.
+    _shot_recipe: Recipe | None = None
 
     def __init__(self, **kwargs: object) -> None:
         """Wire up the worker, the composite widgets and the controllers."""
@@ -324,6 +342,7 @@ class MainWindow(Adw.ApplicationWindow):
             run_transfer=self._camera_ops.run_bank_transfer,
             render_thumb=self._render_recipe_thumb,
             on_closed=self._on_recipe_manager_closed,
+            on_refresh=self._show_shot_with,
         )
         self._single_export = SingleExportController(
             parent=self,
@@ -883,6 +902,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._generation += 1
         self._hover.reset()
         self._raf_path = Path(raf_path)
+        self._shot_recipe = None
+        self._show_shot_with()
         self._show_current_marks()
         self._show_current_source()
         self._settings.last_image = raf_path
@@ -939,7 +960,12 @@ class MainWindow(Adw.ApplicationWindow):
     def _decode_selection(
         self, generation: int, raf_path: str, source: str | None = None
     ) -> None:
-        """Read and decode the preview."""
+        """Read and decode the preview, and the recipe it was shot with."""
+        mainloop.call(
+            self._on_shot_recipe,
+            generation,
+            _shot_recipe_of(source or raf_path),
+        )
         native = imagemeta.native_size(source or raf_path)
         try:
             jpeg = (
@@ -957,6 +983,31 @@ class MainWindow(Adw.ApplicationWindow):
         mainloop.call(
             self._apply_selection, generation, jpeg, pixbuf, rows, native
         )
+
+    def _on_shot_recipe(self, generation: int, shot: Recipe | None) -> bool:
+        """Keep the recipe the open image records and name its match."""
+        if generation == self._generation:
+            self._shot_recipe = shot
+            self._show_shot_with()
+        return GLib.SOURCE_REMOVE
+
+    def _show_shot_with(self) -> None:
+        """Name, under the Recipe row, the saved recipe of the open image.
+
+        Rerun after every library change, so adding, renaming or deleting
+        a recipe updates the name at once.
+        """
+        shot = self._shot_recipe
+        library = self._recipe_library
+        saved = (
+            (name, recipe)
+            for name in library.names
+            if (recipe := library.get(name)) is not None
+        )
+        match = (
+            None if shot is None else recipe_match.matching_recipe(shot, saved)
+        )
+        self.recipe_panel.set_shot_with(*recipe_match.shot_with(shot, match))
 
     def _apply_selection(
         self,

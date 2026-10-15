@@ -113,6 +113,7 @@ class RecipePanel(Adw.PreferencesPage):
         "import-fp": (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
+    recipe_row = Gtk.Template.Child()
     recipe_button = Gtk.Template.Child()
     import_button = Gtk.Template.Child()
     recipe_group = Gtk.Template.Child()
@@ -666,6 +667,11 @@ class RecipePanel(Adw.PreferencesPage):
             self._mono_grid.set_range(caps.mono_max)
         self._update_grain_size_visibility()
         self._update_mono_visibility()
+
+    def set_shot_with(self, subtitle: str, tooltip: str = "") -> None:
+        """Say under the Recipe row what the open image was shot with."""
+        self.recipe_row.set_subtitle(subtitle)
+        self.recipe_row.set_tooltip_text(tooltip or None)
 
     def set_recipe_menu(
         self,

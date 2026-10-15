@@ -71,6 +71,10 @@ on the camera's render. `b` cycles the canvas background.
   by the camera.
 - **Hotkeys**: give a recipe a number key and press it in the main
   window to apply it.
+- **Shot with**: under the recipe picker, grawji names the saved
+  recipe whose settings the open image was shot with, or says that none
+  matches. Cameras do not record which custom bank (C1 to C7) was used,
+  so a library that mirrors your banks shows the bank's recipe.
 - **Fit per body**: each recipe shows how well it fits the connected
   camera, and grawji says what a body drops (for example clarity) when
   you apply it. Duplicates are recognized by their look, not by name.

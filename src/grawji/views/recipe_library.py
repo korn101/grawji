@@ -52,6 +52,7 @@ class RecipeLibraryController:
         render_thumb: (
             Callable[[Recipe, Callable[[bytes | None], None]], None] | None
         ) = None,
+        on_refresh: Callable[[], None] = lambda: None,
     ) -> None:
         """Wire the controller.
 
@@ -76,6 +77,8 @@ class RecipeLibraryController:
             render_thumb: Renders a recipe against the open RAF and calls
                 back with a small thumbnail JPEG. Does nothing when no
                 image is open. None disables recipe thumbnails entirely.
+            on_refresh: Called after every change to the library, also
+                once while wiring.
         """
         self._parent = parent
         self._library = library
@@ -90,6 +93,7 @@ class RecipeLibraryController:
         self.load_bank_names = load_bank_names
         self._run_transfer = run_transfer
         self._render_thumb = render_thumb
+        self._on_refresh = on_refresh
         self._manager: RecipeManagerDialog | None = None
         self._refresh()
 
@@ -312,6 +316,7 @@ class RecipeLibraryController:
         self._panel.set_recipe_menu(ungrouped, folders)
         if self._manager is not None:
             self._manager.refresh()
+        self._on_refresh()
 
     def _on_manager_closed(self, _dialog: Any) -> None:
         """Forget the manager and let the window recover the session."""
