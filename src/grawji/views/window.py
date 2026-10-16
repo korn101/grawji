@@ -94,6 +94,8 @@ _CAMERA_POLL_SECONDS = 3
 _LOAD_DELAY_MS = 50
 # The status while browsing without a camera on USB.
 _NO_CAMERA = "No camera connected, showing the in-camera JPEG."
+# The status for a recipe picked with no camera to develop it.
+_RECIPES_NEED_CAMERA = "Connect the camera to apply recipes."
 # Default side-panel width, used to restore it after a collapse.
 _DEFAULT_SIDEBAR_WIDTH = 240
 # Pane positions at or below this count as collapsed.
@@ -1211,6 +1213,8 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_try_recipes(self) -> None:
         """Render the open image once per saved recipe, pick from a grid."""
+        if self._recipes_unavailable():
+            return
         if not self._session.is_open:
             self.preview_view.set_status("Open an image first.")
             return
@@ -1282,7 +1286,25 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_apply_recipe(self, _panel: Any, name: str) -> None:
         """Apply the picker's choice, guarding unsaved recipe edits."""
+        if self._recipes_unavailable():
+            return
         self._confirm_recipe_discard(partial(self._apply_choice, name))
+
+    def _recipes_unavailable(self) -> bool:
+        """Say why a recipe cannot be applied now, if it cannot.
+
+        The camera develops recipes, so a camera JPEG on screen or no
+        camera at all would leave the panel showing a recipe the image
+        does not. A connected camera still opening the image is fine.
+        """
+        if self._camera_file_of(self._raf_path) is not None:
+            message = "Recipes develop the RAW. Switch to it with j."
+        elif self._session.is_open or camera_info.detect_camera():
+            return False
+        else:
+            message = _RECIPES_NEED_CAMERA
+        self.preview_view.set_status(message)
+        return True
 
     def _apply_choice(self, name: str) -> None:
         """Apply and remember the recipe chosen in the panel's picker."""
@@ -1439,6 +1461,8 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _reset_recipe(self) -> None:
         """Reset all controls to the default recipe, keeping the EV."""
+        if self._recipes_unavailable():
+            return
         exposure = self.recipe_panel.get_recipe().exposure
         self.recipe_panel.set_active(Recipe(), "Default")
         self.recipe_panel.set_exposure(exposure)
@@ -1679,11 +1703,6 @@ class MainWindow(Adw.ApplicationWindow):
         name = self._recipe_library.recipe_for_hotkey(hotkey)
         if name is None:
             return False
-        if self._camera_file_of(self._raf_path) is not None:
-            self.preview_view.set_status(
-                "Recipes develop the RAW. Switch to it with j."
-            )
-            return True
         self._on_apply_recipe(None, name)
         return True
 
