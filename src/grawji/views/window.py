@@ -38,6 +38,7 @@ from grawji.camera.core import (
     shot_dynamic_range,
 )
 from grawji.camera.preview import CameraWorker
+from grawji.controllers.approximation import Approximation, Prepared, prepare
 from grawji.controllers.backup import BackupController
 from grawji.controllers.camera_ops import CameraOpsController
 from grawji.controllers.edit_match import (
@@ -99,6 +100,9 @@ _LOAD_DELAY_MS = 50
 _NO_CAMERA = "No camera connected, showing the in-camera JPEG."
 # The status for a recipe picked with no camera to develop it.
 _RECIPES_NEED_CAMERA = "Connect the camera to apply recipes."
+# The statuses while recipes are approximated from calibration tables.
+_APPROXIMATING = "No camera connected, recipes show an approximation."
+_APPROXIMATION = "Approximation. Connect the camera for the real render."
 # Default side-panel width, used to restore it after a collapse.
 _DEFAULT_SIDEBAR_WIDTH = 240
 # Pane positions at or below this count as collapsed.
@@ -186,6 +190,7 @@ row.recipe-modified {
 .mark-purple { background-color: #9141ac; }
 .mark-rejected picture { opacity: 0.35; }
 .marks-osd { border-radius: 8px; padding: 4px 2px; }
+.approximation-badge { border-radius: 8px; padding: 4px 10px; }
 .mark-button { min-width: 24px; padding: 2px 3px; }
 .mark-button .mark-dot { opacity: 0.3; }
 .mark-button.mark-on .mark-dot,
@@ -223,6 +228,18 @@ def _shot_recipe_of(path: str) -> Recipe | None:
         logging.getLogger("grawji").debug("no recipe read from %s", path)
         return None
     return found.recipe if found is not None else None
+
+
+def _offline_inputs(path: str, shot: Recipe | None) -> Prepared | None:
+    """What approximating a RAF without a camera needs, if it qualifies.
+
+    Like the recipe read, a failure only loses the approximation.
+    """
+    try:
+        return prepare(path, shot)
+    except Exception:
+        logging.getLogger("grawji").debug("no approximation for %s", path)
+        return None
 
 
 @Gtk.Template(string=_UI)
@@ -897,6 +914,14 @@ class MainWindow(Adw.ApplicationWindow):
         self._image_recipes: dict[str, Snapshot] = {}
         # The image whose recipe the panel shows, once it has opened.
         self._panel_image: str | None = None
+        # Without a camera, recipes are approximated when the body has a
+        # calibration bundle; the selection that found no camera, and
+        # the approximation inputs its decode read.
+        self._offline = Approximation(
+            on_done=self._on_offline_done, on_error=self._on_offline_error
+        )
+        self._offline_generation = -1
+        self._offline_prep: Prepared | None = None
 
     def _on_raf_selected(self, raf_path: str, *, quiet: bool = False) -> None:
         """React to the click instantly; load the RAF on the next idle tick.
@@ -916,6 +941,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._hover.reset()
         self._raf_path = Path(raf_path)
         self._shot_recipe = None
+        self._offline.clear()
+        self._offline_prep = None
+        self.preview_view.set_approximation(on=False)
         self._show_shot_with()
         self._show_current_marks()
         self._show_current_source()
@@ -961,6 +989,7 @@ class MainWindow(Adw.ApplicationWindow):
                 on_error=self._on_quiet_error if quiet else self._on_error,
             )
         else:
+            self._offline_generation = generation
             self._set_busy(busy=False, status=_NO_CAMERA)
         threading.Thread(
             target=self._decode_selection,
@@ -974,10 +1003,12 @@ class MainWindow(Adw.ApplicationWindow):
         self, generation: int, raf_path: str, source: str | None = None
     ) -> None:
         """Read and decode the preview, and the recipe it was shot with."""
+        shot = _shot_recipe_of(source or raf_path)
         mainloop.call(
             self._on_shot_recipe,
             generation,
-            _shot_recipe_of(source or raf_path),
+            shot,
+            None if source is not None else _offline_inputs(raf_path, shot),
         )
         native = imagemeta.native_size(source or raf_path)
         try:
@@ -997,10 +1028,16 @@ class MainWindow(Adw.ApplicationWindow):
             self._apply_selection, generation, jpeg, pixbuf, rows, native
         )
 
-    def _on_shot_recipe(self, generation: int, shot: Recipe | None) -> bool:
+    def _on_shot_recipe(
+        self,
+        generation: int,
+        shot: Recipe | None,
+        offline: Prepared | None = None,
+    ) -> bool:
         """Keep the recipe the open image records and name its match."""
         if generation == self._generation:
             self._shot_recipe = shot
+            self._offline_prep = offline
             self._show_shot_with()
         return GLib.SOURCE_REMOVE
 
@@ -1043,6 +1080,12 @@ class MainWindow(Adw.ApplicationWindow):
         self._populate_exif_rows(rows)
         if self._camera_file_of(self._raf_path) is not None:
             self._set_busy(busy=False, status=self._camera_file_status())
+        elif (
+            generation == self._offline_generation
+            and not self._session.is_open
+            and self._offline.load(self._offline_prep, pixbuf)
+        ):
+            self._open_offline()
         return GLib.SOURCE_REMOVE
 
     def _init_navigator(self) -> None:
@@ -1098,13 +1141,10 @@ class MainWindow(Adw.ApplicationWindow):
         """
         if generation != self._generation:
             return  # a newer selection has superseded this open
-        self._panel_image = str(self._raf_path)
-        per_image = self._settings.recipe_per_image
-        carry = (
-            self.recipe_panel.get_recipe()
-            if not per_image and self.recipe_panel.needs_save
-            else None
-        )
+        # The camera renders from here on.
+        self._offline.clear()
+        self.preview_view.set_approximation(on=False)
+        carry = self._carried_recipe()
         profile = self._session.profile
         if profile is not None:
             # The RAF is provably from the connected body (a foreign one
@@ -1121,10 +1161,56 @@ class MainWindow(Adw.ApplicationWindow):
             self._notify_unverified(model)
         else:
             self.recipe_panel.set_dr_ceiling(None)
-        render_working = True
         shot_recipe = (
             recipe_from_profile(profile) if profile is not None else Recipe()
         )
+        self._show_opened(
+            shot_recipe, known=profile is not None, carry=carry, ready="Ready."
+        )
+
+    def _open_offline(self) -> None:
+        """Open the image for approximated renders, as a camera open would.
+
+        The recipe it was shot with comes from its metadata, and the
+        controls from its body's capability table.
+        """
+        prepared = self._offline.prepared
+        if prepared is None:
+            return
+        carry = self._carried_recipe()
+        self.recipe_panel.apply_capabilities(
+            capabilities_for_model(prepared.model)
+        )
+        self.recipe_panel.set_dr_ceiling(prepared.shot.recipe.dynamic_range)
+        self._show_opened(
+            prepared.shot.recipe, known=True, carry=carry, ready=_APPROXIMATING
+        )
+
+    def _carried_recipe(self) -> Recipe | None:
+        """The unsaved edits that follow to the next image, if they do."""
+        if self._settings.recipe_per_image or not self.recipe_panel.needs_save:
+            return None
+        return self.recipe_panel.get_recipe()
+
+    def _show_opened(
+        self,
+        shot_recipe: Recipe,
+        *,
+        known: bool,
+        carry: Recipe | None,
+        ready: str,
+    ) -> None:
+        """Put the recipe the image opens with in the panel and render it.
+
+        Args:
+            shot_recipe: The recipe the image was shot with.
+            known: Whether shot_recipe was read from the image.
+            carry: Unsaved edits that follow from the previous image.
+            ready: The status when the image's own JPEG is the render.
+        """
+        self._panel_image = str(self._raf_path)
+        per_image = self._settings.recipe_per_image
+        render_working = True
         # EV is per image: the stored override wins, else the shot EV.
         self._shot_ev = shot_recipe.exposure
         ev = (
@@ -1138,7 +1224,7 @@ class MainWindow(Adw.ApplicationWindow):
             self._image_ev = ev
             self.recipe_panel.reset_history()
             self._render_preview()
-            if self.preview_view.comparing:
+            if self.preview_view.comparing and self._session.is_open:
                 self._render_baseline(self._generation)
             return
         remembered = (
@@ -1153,7 +1239,7 @@ class MainWindow(Adw.ApplicationWindow):
         from_image = selection == FROM_IMAGE or saved is None
         if remembered is not None:
             self.recipe_panel.restore(remembered)
-        elif profile is not None and from_image:
+        elif known and from_image:
             self.recipe_panel.set_active(shot_recipe, FROM_IMAGE_LABEL)
             # The loaded recipe is the image's own, so the embedded JPEG
             # already shown is exactly what a render would produce - skip the
@@ -1163,7 +1249,7 @@ class MainWindow(Adw.ApplicationWindow):
                 self.preview_view.has_embedded_jpeg
                 and ev == shot_recipe.exposure
             ):
-                self._set_busy(busy=False, status="Ready.")
+                self._set_busy(busy=False, status=ready)
                 render_working = False
         elif saved is not None:
             self.recipe_panel.set_active(saved, selection)
@@ -1173,7 +1259,7 @@ class MainWindow(Adw.ApplicationWindow):
         if render_working:
             self._render_preview()
         # Comparing carries across images: refresh the baseline for this one.
-        if self.preview_view.comparing:
+        if self.preview_view.comparing and self._session.is_open:
             self._render_baseline(self._generation)
 
     def _remember_image_recipe(self) -> None:
@@ -1295,9 +1381,13 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_recipe_changed(self, _panel: Any) -> None:
         """Re-render after a recipe edit."""
-        if not self._session.is_open:
+        if not (self._session.is_open or self._offline_ready()):
             return
         self._schedule_render()
+
+    def _offline_ready(self) -> bool:
+        """Whether recipes are approximated: no camera, a calibrated body."""
+        return not self._session.is_open and self._offline.ready
 
     def _persist_exposure(self) -> None:
         """Store the image's EV in its sidecar when it changed."""
@@ -1318,7 +1408,11 @@ class MainWindow(Adw.ApplicationWindow):
         if self._recipes_unavailable():
             return
         if not self._session.is_open:
-            self.preview_view.set_status("Open an image first.")
+            self.preview_view.set_status(
+                "Connect the camera to try recipes."
+                if self._offline_ready()
+                else "Open an image first."
+            )
             return
         exposure = self.recipe_panel.get_recipe().exposure
         groups: list[tuple[str, list[tuple[str, str, Recipe]]]] = []
@@ -1398,11 +1492,16 @@ class MainWindow(Adw.ApplicationWindow):
 
         The camera develops recipes, so a camera JPEG on screen or no
         camera at all would leave the panel showing a recipe the image
-        does not. A connected camera still opening the image is fine.
+        does not. A connected camera still opening the image is fine, and
+        so is an image approximated from its body's calibration.
         """
         if self._camera_file_of(self._raf_path) is not None:
             message = "Recipes develop the RAW. Switch to it with j."
-        elif self._session.is_open or camera_info.detect_camera():
+        elif (
+            self._session.is_open
+            or self._offline_ready()
+            or camera_info.detect_camera()
+        ):
             return False
         else:
             message = _RECIPES_NEED_CAMERA
@@ -1593,7 +1692,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _render_if_open(self) -> None:
         """Re-render the preview if an image is open."""
-        if self._session.is_open:
+        if self._session.is_open or self._offline_ready():
             self._render_preview()
 
     def _schedule_render(self) -> None:
@@ -1628,9 +1727,15 @@ class MainWindow(Adw.ApplicationWindow):
 
         A recipe already rendered for this image - a film simulation just
         previewed by hovering it, an undone edit - comes from the cache
-        without a camera round trip.
+        without a camera round trip. Without a camera, a calibrated body's
+        image gets an approximation instead.
         """
         recipe = self.recipe_panel.get_recipe()
+        if not self._session.is_open:
+            if self._offline.ready:
+                self._set_busy(busy=True, status="Approximating…")
+                self._offline.render(self._generation, recipe)
+            return
         cached = self._preview_cache.get(recipe)
         if cached is not None:
             self._on_preview(self._generation, recipe, cached)
@@ -1686,8 +1791,28 @@ class MainWindow(Adw.ApplicationWindow):
             self._set_busy(busy=False, status=f"Cannot display image: {error}")
             return GLib.SOURCE_REMOVE
         self.preview_view.show_pixbuf(pixbuf)
+        self.preview_view.set_approximation(on=False)
         self._set_busy(busy=False, status="Ready.")
         return GLib.SOURCE_REMOVE
+
+    def _on_offline_done(self, generation: int, seq: int, pixbuf: Any) -> None:
+        """Show an approximated render, labelled as such."""
+        if (
+            generation != self._generation
+            or seq != self._offline.seq
+            or self._session.is_open
+        ):
+            return  # superseded, or a camera took over
+        self.preview_view.show_pixbuf(pixbuf)
+        self.preview_view.set_approximation(on=True)
+        self._set_busy(busy=False, status=_APPROXIMATION)
+
+    def _on_offline_error(self, generation: int, seq: int, error: str) -> None:
+        """Report an approximation that failed."""
+        if generation != self._generation or seq != self._offline.seq:
+            return
+        logging.getLogger("grawji").warning("approximation failed: %s", error)
+        self._set_busy(busy=False, status=f"Cannot approximate: {error}")
 
     def _init_preview_state(self) -> None:
         """Set up preview bookkeeping, the cache and the hover preview.
@@ -1974,9 +2099,8 @@ class MainWindow(Adw.ApplicationWindow):
         # Controls stay live while the camera works - the worker coalesces
         # rapid changes - so the UI never locks up mid-render.
         enabled = (
-            self._session.is_open
-            and self._camera_file_of(self._raf_path) is None
-        )
+            self._session.is_open or self._offline_ready()
+        ) and self._camera_file_of(self._raf_path) is None
         self.recipe_panel.set_controls_sensitive(enabled)
         self._update_export_button()
         self.preview_view.set_status(status)

@@ -24,9 +24,10 @@ os.environ.setdefault("GDK_BACKEND", "x11")
 
 @pytest.fixture(autouse=True)
 def _isolate_config(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point config and cache at a temp dir so tests never touch ~/.config."""
+    """Point config, cache and data at a temp dir, away from the user's."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
 
 
 @pytest.fixture(scope="session")

@@ -51,6 +51,21 @@
             </style>
           </object>
         </child>
+        <child type="overlay">
+          <object class="GtkLabel" id="approximation_badge">
+            <property name="visible">false</property>
+            <property name="halign">start</property>
+            <property name="valign">start</property>
+            <property name="margin-start">10</property>
+            <property name="margin-top">10</property>
+            <property name="label">Approximation</property>
+            <property name="tooltip-text">No camera is connected, so this is an approximation of the recipe measured from your camera. Grain, clarity and sharpening are left out. Connect the camera for the real render.</property>
+            <style>
+              <class name="osd"/>
+              <class name="approximation-badge"/>
+            </style>
+          </object>
+        </child>
       </object>
     </child>
     <child>

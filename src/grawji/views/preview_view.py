@@ -118,6 +118,7 @@ class PreviewView(Gtk.Box):
     camera_status_icon = Gtk.Template.Child()
     camera_status_label = Gtk.Template.Child()
     size_label = Gtk.Template.Child()
+    approximation_badge = Gtk.Template.Child()
     peek_button = Gtk.Template.Child()
     clip_button = Gtk.Template.Child()
     rotate_left = Gtk.Template.Child()
@@ -338,6 +339,10 @@ class PreviewView(Gtk.Box):
         else:
             launcher.open_containing_folder(window, None, None)
         return True
+
+    def set_approximation(self, *, on: bool) -> None:
+        """Label the shown image as an approximation, or stop labelling."""
+        self.approximation_badge.set_visible(on)
 
     def set_spinner(self, *, active: bool) -> None:
         """Show and run the status-line spinner, or hide and stop it."""

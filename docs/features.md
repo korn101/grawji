@@ -50,7 +50,10 @@ RAF, and renders follow as you move a control.
 - **RAW+JPEG shots** can open from the camera JPEG instead, switch with
   `j`.
 - Works without a camera too: you can browse and the in-camera JPEG is
-  shown. Recipes need the camera, and picking one says so.
+  shown. Recipes need the camera, and picking one says so, unless
+  your body has a calibration in `~/.local/share/grawji/filmsim/`:
+  then recipes and edits show an approximation measured from it,
+  labelled as such, without grain, clarity or sharpening.
 
 ## Compare, histogram and clipping
 
