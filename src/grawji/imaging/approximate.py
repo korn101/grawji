@@ -176,9 +176,15 @@ class Calibration:
         return None if preset is None else base * np.array(preset)
 
     def can_approximate(self, shot: Recipe, target: Recipe) -> bool:
-        """Whether both recipes are covered: a colour shot, a known sim."""
+        """Whether both recipes are covered.
+
+        The shot must be colour (a B&W JPEG has no colour to take back)
+        with a known dynamic range (DR Auto does not say which table
+        undoes it), and the target's film simulation must be measured.
+        """
         return (
             shot.film_simulation in self.colour_sims
+            and shot.dynamic_range in _DR
             and target.film_simulation in self.sims
         )
 

@@ -128,6 +128,11 @@ def test_a_bw_shot_cannot_be_approximated(cal: Calibration) -> None:
     )
 
 
+def test_a_dr_auto_shot_cannot_be_approximated(cal: Calibration) -> None:
+    """The metadata does not say which DR table would undo it."""
+    assert not cal.can_approximate(Recipe(dynamic_range="Auto"), Recipe())
+
+
 def test_the_installed_bundle_is_found() -> None:
     """A body's bundle is read from grawji's data directory."""
     assert calibration_for("X100V") is None
