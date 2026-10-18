@@ -1,20 +1,25 @@
 """Approximate recipes without a camera, from a body's calibration tables.
 
 A calibration bundle holds tables measured on one body by rendering
-synthetic charts through it. To approximate a recipe on a photo, its
-built-in JPEG is taken back to linear scene values by undoing the recipe
-it was shot with, then taken forward through the target recipe:
+synthetic charts through it. A recipe is approximated on a photo's linear
+scene values, taken forward through the target recipe:
 
-- undo: the shot's setting tables in reverse, the film simulation's
-  inverse table at the shot's dynamic range, the shot's WB shift;
 - redo: the target's white balance, WB shift and exposure as gains, the
   B&W tone curves, the film simulation's forward table at the target's
   dynamic range (capped at the shot's), then its setting tables.
 
-The whole chain is a per-colour function, so it is folded into one 3D
-lookup table that Pillow applies to the image in a single pass. Grain,
-clarity, sharpness and noise reduction are not reproduced, and a B&W shot
-cannot be taken back to colour.
+The scene comes from the RAF's raw data when the body has a texture
+calibration too (its ``<model>.texture.json``): develop.py develops it
+and texture.py adds noise reduction, clarity, sharpening and grain. The
+redo is then one table indexed by encoded scene values.
+
+Otherwise it comes from the built-in JPEG, by undoing the recipe it was
+shot with: the shot's setting tables in reverse, the film simulation's
+inverse table at the shot's dynamic range, the shot's WB shift. Undo and
+redo together are a per-colour function, folded into one 3D lookup table
+that Pillow applies in a single pass. That way grain, clarity, sharpness
+and noise reduction stay as shot, and a B&W shot cannot be taken back to
+colour.
 """
 
 from __future__ import annotations
@@ -136,6 +141,7 @@ class Calibration:
         self._hi = float(np.log2(enc["s_max"] + self._eps))
         self.colour_sims = frozenset(self.meta["colour_sims"])
         self.sims = frozenset(self.meta["sims"])
+        self.texture = _read_texture(path.with_suffix(".texture.json"))
 
     def _encode(self, s: Array) -> Array:
         u = (np.log2(np.maximum(s, 0) + self._eps) - self._lo) / (
@@ -175,15 +181,18 @@ class Calibration:
         preset = self.meta["presets"].get(mode)
         return None if preset is None else base * np.array(preset)
 
-    def can_approximate(self, shot: Recipe, target: Recipe) -> bool:
+    def can_approximate(
+        self, shot: Recipe, target: Recipe, *, raw: bool = False
+    ) -> bool:
         """Whether both recipes are covered.
 
-        The shot must be colour (a B&W JPEG has no colour to take back)
-        with a known dynamic range (DR Auto does not say which table
-        undoes it), and the target's film simulation must be measured.
+        The shot needs a known dynamic range (DR Auto does not say which
+        table undoes it or how far the raw data was pushed), and the
+        target's film simulation must be measured. From the built-in JPEG
+        the shot must be colour too: a B&W JPEG has no colour to take back.
         """
         return (
-            shot.film_simulation in self.colour_sims
+            (raw or shot.film_simulation in self.colour_sims)
             and shot.dynamic_range in _DR
             and target.film_simulation in self.sims
         )
@@ -239,6 +248,20 @@ class Calibration:
                     x = lut3(x, lut)
         return np.clip(x, 0, 1)
 
+    def scene_table(self, shot: Shot, target: Recipe) -> Array:
+        """The target recipe on developed raw data, as a 33³ table.
+
+        Indexed [r, g, b, channel] by encoded scene values: a pixel's
+        scene value s is looked up at the encoding of s per channel.
+        """
+        axis = self._decode(np.linspace(0, 1, _TABLE_SIZE, dtype=np.float32))
+        grid = np.stack(np.meshgrid(axis, axis, axis, indexing="ij"), -1)
+        return self._redo(grid, shot, target)
+
+    def apply_scene_table(self, scene: Array, table: Array) -> Array:
+        """Scene levels through a scene table, as output values in 0..1."""
+        return lut3(self._encode(scene), table)
+
     def look_table(self, shot: Shot, target: Recipe) -> ImageFilter.Color3DLUT:
         """The whole shot -> target conversion as one Pillow 3D LUT."""
         g = np.linspace(0, 1, _TABLE_SIZE, dtype=np.float32)
@@ -266,6 +289,31 @@ class Calibration:
                 recipe.white_balance, recipe.color_temp
             )
         return Shot(recipe, levels)
+
+    def raw_shot(
+        self, recipe: Recipe, as_shot: tuple[float, float, float]
+    ) -> Shot:
+        """The shot of a RAF developed from its raw data.
+
+        Args:
+            recipe: The recipe recorded in the photo's metadata.
+            as_shot: The levels (G, R, B) the camera applied, which include
+                the shot's WB shift. The scene is developed without it;
+                the target's own shift takes its place.
+        """
+        g, r, b = as_shot
+        shift = self.shift_gain(recipe.wb_shift_r, recipe.wb_shift_b)
+        levels = np.array([r / g, 1.0, b / g], dtype=np.float32) / shift
+        return Shot(recipe, levels.astype(np.float32))
+
+
+def _read_texture(path: Path) -> dict[str, Any] | None:
+    """A body's texture calibration, or None if it has none."""
+    try:
+        texture = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return texture if isinstance(texture, dict) else None
 
 
 def apply_table(

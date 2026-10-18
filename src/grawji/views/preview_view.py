@@ -49,6 +49,13 @@ _LOG = logging.getLogger("grawji")
 _MAX_REPAIRS = 4
 # Longest edge of the image used while crop-editing.
 _EDIT_MAX_EDGE = 2560
+# The approximation badge's tooltip when the raw data was developed; the
+# .ui's own says what an approximation from the in-camera JPEG leaves out.
+_DEVELOPED_TIP = (
+    "No camera is connected, so this is an approximation of the recipe "
+    "measured from your camera, developed from the raw data. Connect the "
+    "camera for the real render."
+)
 
 # Zoom is multiplicative.
 ZOOM_STEP = 1.15
@@ -148,6 +155,7 @@ class PreviewView(Gtk.Box):
         self._oriented_pixbuf: Any | None = None
         self._original_pixbuf: Any | None = None
         self._embedded_jpeg: bytes | None = None
+        self._jpeg_tip = self.approximation_badge.get_tooltip_text()
         self._peek = False
         self._pan_h = 0.0
         self._pan_v = 0.0
@@ -340,9 +348,18 @@ class PreviewView(Gtk.Box):
             launcher.open_containing_folder(window, None, None)
         return True
 
-    def set_approximation(self, *, on: bool) -> None:
-        """Label the shown image as an approximation, or stop labelling."""
+    def set_approximation(self, *, on: bool, developed: bool = False) -> None:
+        """Label the shown image as an approximation, or stop labelling.
+
+        Args:
+            on: Whether the image is an approximation.
+            developed: Whether it was developed from the raw data, so its
+                grain, clarity, sharpness and noise reduction are too.
+        """
         self.approximation_badge.set_visible(on)
+        self.approximation_badge.set_tooltip_text(
+            _DEVELOPED_TIP if developed else self._jpeg_tip
+        )
 
     def set_spinner(self, *, active: bool) -> None:
         """Show and run the status-line spinner, or hide and stop it."""
