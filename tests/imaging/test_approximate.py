@@ -14,7 +14,7 @@ from grawji.imaging.approximate import (
     calibration_for,
 )
 from grawji.recipe import Recipe
-from tests.approx_support import STOP, write_bundle
+from tests.approx_support import STOP, write_bundle, write_texture
 
 # Mid tones: far from clipping at either end after a stop either way.
 MID = np.full((4, 6, 3), 128, dtype=np.uint8)
@@ -131,6 +131,49 @@ def test_a_bw_shot_cannot_be_approximated(cal: Calibration) -> None:
 def test_a_dr_auto_shot_cannot_be_approximated(cal: Calibration) -> None:
     """The metadata does not say which DR table would undo it."""
     assert not cal.can_approximate(Recipe(dynamic_range="Auto"), Recipe())
+
+
+def test_a_raw_shot_takes_its_wb_shift_out(cal: Calibration) -> None:
+    """The scene is developed without the shift; the target's replaces it."""
+    shot = cal.raw_shot(
+        Recipe(wb_shift_r=3, wb_shift_b=-3), (100.0, 400.0, 100.0)
+    )
+    assert shot.levels is not None
+    np.testing.assert_allclose(shot.levels, [2.0, 1.0, 2.0])
+
+
+def test_a_scene_table_applies_the_target_alone(cal: Calibration) -> None:
+    """Developed raw data has nothing to undo: only the target applies."""
+    shot = cal.raw_shot(Recipe(color=2), (100.0, 180.0, 180.0))
+    scene = np.full((2, 3, 3), 0.05, np.float32)
+    same = cal.apply_scene_table(scene, cal.scene_table(shot, Recipe()))
+    u = (np.log2(0.05 + 2.0**-14) + 14) * STOP
+    np.testing.assert_allclose(same, u, atol=2e-3)
+    plus = cal.apply_scene_table(
+        scene, cal.scene_table(shot, Recipe(color=2, exposure=1.0))
+    )
+    np.testing.assert_allclose(plus, 0.5 + (u + STOP) / 2, atol=2e-3)
+
+
+def test_raw_data_takes_a_bw_shot_back_to_colour(cal: Calibration) -> None:
+    """With the raw data, only the target's film simulation matters."""
+    acros = Recipe(film_simulation="Acros")
+    assert cal.can_approximate(acros, Recipe(), raw=True)
+    assert not cal.can_approximate(
+        Recipe(dynamic_range="Auto"), Recipe(), raw=True
+    )
+
+
+def test_the_texture_calibration_sits_beside_the_bundle(
+    tmp_path: Path,
+) -> None:
+    """A body without one is approximated from the built-in JPEG."""
+    bundle = write_bundle(tmp_path / "X100V.npz")
+    assert Calibration(bundle).texture is None
+    write_texture(bundle)
+    texture = Calibration(bundle).texture
+    assert texture is not None
+    assert set(texture) >= {"develop", "noise", "grain"}
 
 
 def test_the_installed_bundle_is_found() -> None:

@@ -53,7 +53,11 @@ RAF, and renders follow as you move a control.
   shown. Recipes need the camera, and picking one says so, unless
   your body has a calibration in `~/.local/share/grawji/filmsim/`:
   then recipes and edits show an approximation measured from it,
-  labelled as such, without grain, clarity or sharpening.
+  labelled as such. With the body's texture calibration there too
+  (`<model>.texture.json`) the raw data is developed, so grain,
+  clarity, sharpness and noise reduction are approximated as well and
+  black and white shots can go back to colour; otherwise the in-camera
+  JPEG is converted, without those.
 
 ## Compare, histogram and clipping
 

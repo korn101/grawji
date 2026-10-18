@@ -124,6 +124,17 @@ def exif_orientation(path: str) -> int:
     return value if 1 <= value <= 8 else 1  # noqa: PLR2004
 
 
+def iso_speed(path: str) -> int | None:
+    """A file's recorded ISO, or None."""
+    meta = GExiv2.Metadata()
+    try:
+        meta.open_path(path)
+        value = meta.try_get_tag_long("Exif.Photo.ISOSpeedRatings")
+    except GLib.Error:
+        return None
+    return value if value > 0 else None
+
+
 def exif_interop_index(path: str) -> str | None:
     """Read a file's EXIF interoperability index."""
     meta = GExiv2.Metadata()

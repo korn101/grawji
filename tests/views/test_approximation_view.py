@@ -9,11 +9,12 @@ from typing import Any
 import pytest
 
 from grawji.camera.core import CameraSession
-from grawji.controllers.approximation import Prepared
+from grawji.controllers import approximation
+from grawji.controllers.approximation import Prepared, RawSource
 from grawji.imaging.approximate import Calibration
 from grawji.recipe import Recipe
 from grawji.views import window as window_module
-from tests.approx_support import write_bundle
+from tests.approx_support import mosaic, write_bundle, write_texture
 from tests.gui_support import pump
 
 pytestmark = pytest.mark.gui
@@ -148,3 +149,30 @@ def test_an_edit_is_approximated(win: Any) -> None:
         win.preview_view.approximation_badge.get_visible,
         "the edit was not approximated",
     )
+
+
+def test_a_raw_development_is_labelled_as_one(
+    win: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With a texture calibration the badge says the raw was developed."""
+    bundle = write_bundle(tmp_path / "raw" / "X100V.npz")
+    write_texture(bundle)
+    cal = Calibration(bundle)
+    prepared = Prepared(
+        cal,
+        cal.raw_shot(SHOT, (100.0, 180.0, 180.0)),
+        "X100V",
+        RawSource(win.test_raf, 800.0),
+    )
+    monkeypatch.setattr(
+        window_module, "_offline_inputs", lambda _p, _s: prepared
+    )
+    monkeypatch.setattr(
+        approximation, "read_raf", lambda _p: mosaic((300, 500, 250))
+    )
+    _open(win)
+    win._on_apply_recipe(None, NAME)
+    badge = win.preview_view.approximation_badge
+    _wait(badge.get_visible, "no approximation was shown")
+    assert "raw data" in badge.get_tooltip_text()
+    assert win.preview_view.source_pixbuf.get_width() == 36

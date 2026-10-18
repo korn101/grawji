@@ -1803,8 +1803,12 @@ class MainWindow(Adw.ApplicationWindow):
             or self._session.is_open
         ):
             return  # superseded, or a camera took over
+        prepared = self._offline.prepared
         self.preview_view.show_pixbuf(pixbuf)
-        self.preview_view.set_approximation(on=True)
+        self.preview_view.set_approximation(
+            on=True,
+            developed=prepared is not None and prepared.raw is not None,
+        )
         self._set_busy(busy=False, status=_APPROXIMATION)
 
     def _on_offline_error(self, generation: int, seq: int, error: str) -> None:
